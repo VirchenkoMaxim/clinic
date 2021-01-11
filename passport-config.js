@@ -1,12 +1,11 @@
 import { Strategy as LocalStrategy } from 'passport-local';
 
 import { ExtractJwt, Strategy as JwtStrategy } from 'passport-jwt';
-import { conn } from './core/db.js';
 
 export const initializePassport = (passport) => {
   const authenticateUser = async (name, password, done) => {
     try {
-      const sql = 'SELECT name, id, password FROM admins WHERE name = ?';
+      const data = 'SELECT name, id, password FROM admins WHERE name = ?';
       const [user] = await conn.query(sql, [name]);
       if (user.length == 0 || +password !== +user[0].password) {
         return done(Error('Incorrect username or password'), false);

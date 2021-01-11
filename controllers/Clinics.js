@@ -1,11 +1,20 @@
-import { conn } from '../core/db.js';
-import { valuesFromReqArr } from '../utils/helpers.js';
+import { ClinicModel } from '../Models/Clinic.js';
+import { DoctorModel } from '../Models/Doctor.js';
+import { ServiceModel } from '../Models/Service.js';
+import pkg from 'mongoose';
+import {
+  ValidationError,
+  ErrorHandler,
+  BadRequestError,
+  NotModifiedError,
+} from '../utils/error.js';
+import { validationResult } from 'express-validator';
+const { isValidObjectId } = pkg;
 
 export class ClinicsCtrl {
   static async index(req, res, next) {
     try {
-      const sql = 'SELECT * FROM clinics';
-      const [data] = await conn.query(sql);
+      const data = await ClinicModel.find({}, 'name');
       res.json({
         status: 'success',
         data,
@@ -15,94 +24,45 @@ export class ClinicsCtrl {
     }
   }
 
-  static async createRelation(req, res, next) {
+  static async selectOne(req, res, next) {
     try {
-      const clinicId = +req.params.id;
-      const doctors =
-        !req.body.doctors_id || req.body.doctors_id.length != 0
-          ? req.body.doctors_id
-          : false;
-      const services =
-        !req.body.services_id || req.body.services_id.length != 0
-          ? req.body.services_id
-          : false;
+      const clinicId = req.params.id;
+      if (!isValidObjectId(clinicId))
+        throw new BadRequestError('Incorrect request parameters');
+      const data = await ClinicModel.findById(
+        clinicId,
+        '-services -__v',
+      ).populate({
+        path: 'doctors',
+        select: 'name',
+        populate: {
+          path: 'services',
+          select: 'name',
+        },
+      });
 
-      if (doctors) {
-        const values = valuesFromReqArr(clinicId, doctors);
-        const sql =
-          'INSERT INTO clinics_has_doctors(clinics_id, doctors_id) VALUES ?';
-        const data = await conn.query(sql, [values]);
-      }
-      if (services) {
-        const values = valuesFromReqArr(clinicId, services);
-        const sql =
-          'INSERT INTO clinics_has_services(clinics_id, services_id) VALUES ?';
-        const data = await conn.query(sql, [values]);
-      }
       res.json({
         status: 'success',
+        data,
       });
     } catch (error) {
       next(error);
     }
   }
 
-  static async selectOne(req, res, next) {
-    try {
-      const clinicId = req.params.id;
-      const doctorsSql = `
-      select d.*
-      from doctors d
-      inner join clinics_has_doctors cd on d.id = cd.doctors_id
-      inner join clinics c on cd.clinics_id = c.id
-      WHERE c.id = ? `;
-      const servicesSql = `select s.*  
-       from services s
-       inner join clinics_has_services cs on s.id = cs.services_id
-       inner join clinics c on cs.clinics_id = c.id
-       WHERE c.id = ? `;
-      const clinicSql = `SELECT * from clinics WHERE id = ?`;
-      const [clinic] = await conn.query(clinicSql, [clinicId]);
-      const [doctors] = await conn.query(doctorsSql, [clinicId]);
-      const [services] = await conn.query(servicesSql, [clinicId]);
-      clinic[0]
-        ? res.json({
-            status: 'success',
-            data: { ...clinic[0], doctors, services },
-          })
-        : next(new Error('Undefined value'));
-    } catch (error) {
-      next(error);
-    }
-  }
   static async getDetailedList(req, res, next) {
     try {
-      const clinicsSql = `SELECT * from clinics`;
-      const [clinics] = await conn.query(clinicsSql);
-      const data = await Promise.all(
-        clinics.map(async (item, index) => {
-          const sql = `
-        select d.*
-        from doctors d
-        inner join clinics_has_doctors cd on d.id = cd.doctors_id
-        inner join clinics c on cd.clinics_id = c.id
-        WHERE c.id = ? `;
-          const [doctors] = await conn.query(sql, [item.id]);
+      const data = await ClinicModel.find({}, '-services -__v')
+        .populate({
+          path: 'doctors',
+          select: 'name',
+          populate: {
+            path: 'services',
+            select: 'name',
+          },
+        })
+        .sort({ name: 1 });
 
-          const doctorsWithServices = await Promise.all(
-            doctors.map(async (item, index) => {
-              const sql = `select s.*  
-              from services s
-              inner join clinics_has_services cs on s.id = cs.services_id
-              inner join clinics c on cs.clinics_id = c.id
-              WHERE c.id = ? `;
-              const [services] = await conn.query(sql, [item.id]);
-              return { ...item, services };
-            }),
-          );
-          return { ...item, doctors: doctorsWithServices };
-        }),
-      );
       res.json({
         status: 'success',
         data,
@@ -114,9 +74,184 @@ export class ClinicsCtrl {
 
   static async create(req, res, next) {
     try {
-      const sql = 'INSERT INTO clinics(name) VALUES(?)';
-      const value = [req.body.name];
-      const [data] = await conn.query(sql, value);
+      const body = {
+        name: req.body.name,
+      };
+      const data = await ClinicModel.create(body);
+
+      res.json({
+        status: 'success',
+        data,
+      });
+    } catch (err) {
+      if (err.name == 'ValidationError') {
+        next(new ValidationError(err));
+      }
+      next(err);
+    }
+  }
+
+  static async createRelation(req, res, next) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        next(new ValidationError({ errors: errors.array() }));
+      }
+      const clinicId = req.params.id;
+      const servicesId = req.body.servicesId;
+      const doctorsId = req.body.doctorsId;
+      const uniqueDoctors =
+        doctorsId &&
+        (
+          await Promise.all(
+            doctorsId.map(async (id) => {
+              try {
+                const conditions = {
+                  _id: id,
+                  clinics: { $ne: clinicId },
+                };
+                const data = await DoctorModel.findOneAndUpdate(conditions, {
+                  $push: { clinics: clinicId },
+                });
+                return data && id;
+              } catch (error) {
+                next(err);
+              }
+            }),
+          )
+        ).filter((item) => item);
+
+      const uniqueServices =
+        servicesId &&
+        (
+          await Promise.all(
+            servicesId.map(async (id) => {
+              try {
+                const conditions = {
+                  _id: id,
+                  clinics: { $ne: clinicId },
+                };
+                const data = await ServiceModel.findOneAndUpdate(conditions, {
+                  $push: { clinics: clinicId },
+                });
+                return data && id;
+              } catch (error) {
+                next(error);
+              }
+            }),
+          )
+        ).filter((item) => item);
+
+      const isUniqueDoctors = uniqueDoctors && uniqueDoctors.length != 0;
+      const isUniqueServices = uniqueServices && uniqueServices.length != 0;
+
+      const data =
+        (isUniqueDoctors || isUniqueServices) &&
+        (await ClinicModel.findByIdAndUpdate(
+          clinicId,
+          {
+            $push: {
+              ...(isUniqueDoctors && { doctors: uniqueDoctors }),
+              ...(isUniqueServices && { services: uniqueServices }),
+            },
+          },
+          { new: true },
+        ));
+      if (!data) throw new NotModifiedError();
+
+      res.json({
+        status: 'success',
+        data,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+  static async addOneToRelation(req, res, next) {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        next(new ValidationError({ errors: errors.array() }));
+        return;
+      }
+      const paramsId = req.params.id;
+      const updateModel = async (model, paramsId, idForUpdate, { update }) => {
+        try {
+          const conditions = {
+            _id: idForUpdate,
+            clinics: { $ne: paramsId },
+          };
+          const preUpdate = await model.findOneAndUpdate(conditions, {
+            $push: { clinics: paramsId },
+          });
+          if (!preUpdate) throw new NotModifiedError();
+
+          const data =
+            preUpdate &&
+            (await ClinicModel.findOneAndUpdate(
+              { _id: paramsId, [update]: { $ne: idForUpdate } },
+              {
+                $push: { [update]: idForUpdate },
+              },
+              { new: true },
+            ));
+          if (!data) throw new NotModifiedError();
+
+          res.json({
+            status: 'success',
+            data,
+          });
+        } catch (error) {
+          next(error);
+        }
+      };
+
+      if (req.body.serviceId) {
+        updateModel(ServiceModel, paramsId, req.body.serviceId, {
+          update: 'services',
+        });
+      }
+      if (req.body.doctorId) {
+        updateModel(ClinicModel, paramsId, req.body.doctorId, {
+          update: 'doctors',
+        });
+      }
+    } catch (err) {
+      next(err);
+    }
+  }
+  static async delete(req, res, next) {
+    try {
+      if (!isValidObjectId(req.params.id))
+        throw new BadRequestError('Incorrect request parameters');
+
+      const clinicToDel = await ClinicModel.findById(req.params.id);
+      if (!clinicToDel) throw new BadRequestError('Incorrect request params');
+
+      await Promise.all([
+        clinicToDel.services.forEach(async (id) => {
+          try {
+            await ServiceModel.findOneAndUpdate(
+              { _id: id },
+              { $pull: { clinics: req.params.id } },
+            );
+          } catch (error) {
+            next(error);
+          }
+        }),
+        clinicToDel.doctors.forEach(async (id) => {
+          try {
+            await DoctorModel.findOneAndUpdate(
+              { _id: id },
+              { $pull: { clinics: req.params.id } },
+            );
+          } catch (error) {
+            next(error);
+          }
+        }),
+      ]);
+
+      const data = await ClinicModel.findByIdAndDelete(req.params.id);
 
       res.json({
         status: 'success',
@@ -126,16 +261,53 @@ export class ClinicsCtrl {
       next(err);
     }
   }
-
-  static async delete(req, res, next) {
+  static async deleteRelation(req, res, next) {
     try {
-      const sql = 'DELETE FROM clinics WHERE id = ?';
-      const value = [req.params.id];
-      const data = await conn.query(sql, value);
-      res.json({
-        status: 'success',
-        data,
-      });
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        next(new ValidationError({ errors: errors.array() }));
+        return;
+      }
+      if (!req.query.doctorId && !req.query.serviceId)
+        throw new BadRequestError('Incorrect parameters');
+
+      const deleteRelation = async (model, paramsId, queryId, { update }) => {
+        try {
+          const preUpdate = await model.findOneAndUpdate(
+            { _id: queryId, clinics: paramsId },
+            {
+              $pull: { clinics: paramsId },
+            },
+          );
+          // if (!preUpdate) throw new NotModifiedError();
+
+          const data = await ClinicModel.findByIdAndUpdate(
+            paramsId,
+            {
+              $pull: { [update]: queryId },
+            },
+            { new: true },
+          );
+          if (!data) throw new NotModifiedError();
+
+          res.json({
+            status: 'success',
+            data,
+          });
+        } catch (error) {
+          next(error);
+        }
+      };
+
+      req.query.doctorId &&
+        deleteRelation(DoctorModel, req.params.id, req.query.doctorId, {
+          update: 'doctors',
+        });
+
+      req.query.serviceId &&
+        deleteRelation(ServiceModel, req.params.id, req.query.serviceId, {
+          update: 'services',
+        });
     } catch (error) {
       next(error);
     }
